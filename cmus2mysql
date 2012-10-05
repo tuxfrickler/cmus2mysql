@@ -1,0 +1,344 @@
+#!/usr/bin/env python
+# by mendress  
+#
+#  submit track info to mysql database
+#  install in cmus --> ":set status_display_program=/path/to/cmus2mysql.py"
+
+
+import urllib, urllib2, os
+from urllib import quote, unquote
+import time
+import MySQLdb as mdb
+import sys
+import datetime
+from datetime import datetime
+import logging
+import signal
+import re
+import os
+import subprocess
+
+
+DEBUG = 1
+
+logger = logging.getLogger('cmus2mysql')
+hdlr = logging.FileHandler('/tmp/cmus2mysql.log')
+formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+hdlr.setFormatter(formatter)
+logger.addHandler(hdlr)
+if DEBUG:
+    logger.setLevel(logging.DEBUG)
+else:
+    logger.setLevel(logging.INFO)
+    
+REFRESHCOUNT = 5
+
+#mysql db dictionary
+mysqlServer_config = { 
+        'dbHost'      : 'dbHost',
+        'dbUsername'  : 'dbUsername',
+        'dbPassword'  : 'dbPassword',
+        'dbName'      : 'dbName',
+        'dbTable'     : 'playlist'
+    }
+
+class LastCmus(object):
+    def __init__(self):
+        self.data = {}              # dict with unicode values, contains songs info
+        self.f_pid = None           # status file
+        self.f_cache  = None        # cache file
+        self.conn   = None          # mysql handle
+        self.unixtimestamp = None   #
+        self.cache_content = None   # content of the status
+        self.lastSongSubmit = 0     #
+        self.fpid = 0             #
+
+        if not self.f_pid:   # get status path if none specifided
+            self.f_pid = "/home/%s/.cmus/cmus2mysql-pid" % (
+                    os.environ["USER"])
+            
+        if not self.f_cache:   # get status path if none specifided
+            self.f_cache = "/home/%s/.cmus/cmus2mysql-cache" % (
+                    os.environ["USER"])
+        
+        # touch
+        if not os.path.exists(self.f_cache):
+            open(self.f_cache, 'w').close()
+        
+        # touch
+        if not os.path.exists(self.f_pid):
+            open(self.f_pid, 'w').close()
+        else:
+            with open(self.f_pid, 'r') as pid_f:
+              string = pid_f.readline()
+              matchObj = re.match(r'<pid=([^>]+)><last=([^>]+)>', string)
+              self.fpid = matchObj.group(1)
+              self.lastSongSubmit = matchObj.group(2)
+              pid_f.close()
+        
+        #sleep(min(int(round(self.data['duration']/2.0)), 180))
+        
+        
+    def update_status(self):
+        try:
+            logger.debug('main initialized')
+            self.get_song_info()        # get song info
+            self.unixtimestamp = int(time.mktime(datetime.now().timetuple()))
+            
+            with open(self.f_pid, 'w') as pid_f:
+                out = "<pid=%s><last=%s>" % ((str(os.getpid())) , self.lastSongSubmit)
+                pid_f.write(out)
+            
+            pid = os.fork()
+            
+            if pid > 0:
+                logger.debug("PID %d" % pid)
+                return
+            else:
+                if self.fpid > 0:
+                    logger.debug("pid found %s" % self.fpid)
+                    with open(self.f_pid, 'w') as pid_f:
+                        out = "<pid=%s><last=%s>" % ((str(os.getpid())) , self.lastSongSubmit)
+                        pid_f.write(out)
+                    self.send_sig(0, self.fpid)
+                    self.send_sig(signal.SIGTERM, self.fpid)
+                
+            duration = int(self.data['duration'])
+            logger.debug(min(int(round(duration/2.0)), 180))
+            
+            time.sleep(min(int(round(duration/2.0)), 180))
+            
+            actualSong = '\t'.join((
+                            quote(self.data['file'].encode('utf-8')),
+                            quote(self.data['artist'].encode('utf-8')),
+                            quote(self.data['title'].encode('utf-8')),
+                            quote(self.data['album'].encode('utf-8')),
+                            self.data['tracknumber'].encode('utf-8'),
+                            quote(self.data['duration'].encode('utf-8')),
+                            str(self.unixtimestamp).encode('utf-8')
+                            )
+                          )
+            
+            submitActlTitle = 0
+            
+            with open(self.f_cache, 'r+') as f_cache:
+                query = f_cache.read().splitlines()
+                
+                if len(query) >= 1:
+                    lastTitle = self.get_cacheLine(query[-1])
+                else:
+                    lastTitle = None
+                
+                if (int(self.data['duration']) < 30) or (
+                  (self.combine(self.data)) == (self.combine(lastTitle))):
+                      logger.debug("track to short --> %ss or submitted twice", 
+                        self.data['duration'])
+
+                else:
+                    query.append(actualSong)
+                    submitActlTitle = 1
+                
+                newlist = []
+                logger.debug(len(query))
+                
+                if (len(query) >= 3):
+                    for song in query[0:-1]:
+                        self.parse_cacheLine(song)
+                        if self.write2sql():
+                            newlist.append(song)
+                    newlist.append(query[-1])
+                    self.parse_cacheLine(query[-1])
+                    if self.write2sql():
+                        self.lastSongSubmit = 0
+                    else:
+                        self.lastSongSubmit = 1
+
+                elif (len(query) == 2):
+                    for song in query[0:-1]:
+                        self.parse_cacheLine(song)
+                        if ((not self.lastSongSubmit) and (
+                          not submitActlTitle)):
+                            
+                            if self.write2sql():
+                                newlist.append(song)
+                            
+                    newlist.append(query[-1])
+                    self.parse_cacheLine(query[-1])
+                    if self.write2sql():
+                        self.lastSongSubmit = 0
+                    else:
+                        self.lastSongSubmit = 1
+                
+                elif len(query) == 1:
+                    newlist.append(query[-1])
+                    self.parse_cacheLine(query[-1])
+                    if (((not self.lastSongSubmit) and (
+                      not submitActlTitle)) or (submitActlTitle)):
+                        if self.write2sql():
+                            self.lastSongSubmit = 0
+                        else:
+                            self.lastSongSubmit = 1
+                    
+                f_cache.seek(0)
+                f_cache.write("\n".join(newlist))
+                f_cache.truncate()
+                      
+            with open(self.f_pid, 'w') as pid_f:
+                out = "<pid=%s><last=%s>" % ((str(os.getpid())) , self.lastSongSubmit)
+                pid_f.write(out)
+        
+        except IOError, ex:
+            logger.error("%d: %s", ex.args[0], ex.args[1])
+            
+        except:
+            logger.error("update_status")
+            
+    def parse_cacheLine(self, cacheLine):
+        logger.debug("method 'parse_cacheLine' IN")
+        (file_name, artist, title, album, tracknumber, duration, start_time) = cacheLine.split("\t")
+        
+        self.cache_content = {'file_name': unquote(file_name).decode('utf-8'),
+                              'artist': unquote(artist).decode('utf-8'),
+                              'title': unquote(title).decode('utf-8'),
+                              'album': unquote(album).decode('utf-8'),
+                              'tracknumber': tracknumber.decode('utf-8'),
+                              'duration': int(duration),
+                              'start_time': int(start_time)
+                              }
+                              
+        logger.debug("method 'parse_cacheLine' OUT'")
+        
+    def get_cacheLine(self, cacheLine):
+        logger.debug("method 'get_cacheLine' IN")
+        try:
+            (file_name, artist, title, album, tracknumber, duration, start_time) = cacheLine.split("\t")
+            
+            get_cacheLine =     { 'file_name': unquote(file_name).decode('utf-8'),
+                                  'artist': unquote(artist).decode('utf-8'),
+                                  'title': unquote(title).decode('utf-8'),
+                                  'album': unquote(album).decode('utf-8'),
+                                  'tracknumber': tracknumber.decode('utf-8'),
+                                  'duration': int(duration),
+                                  'start_time': int(start_time)
+                                }
+                                  
+            #logger.debug(self.cache_content)
+            logger.debug("method 'get_cacheLine' OUT'")
+            return get_cacheLine
+            
+        except mdb.Error, ex:
+            logger.error("%d: %s", ex.args[0], ex.args[1])
+            #write2sql = 1
+            
+        finally:
+            #if self.conn:
+            #    self.conn.close()
+            logger.debug("method 'write2sql' OUT")
+            #return write2sql
+            
+    def combine(self, tmp):
+        try:
+            logger.debug("method 'combine' IN")
+            combine = "none"
+            if not tmp == None:
+                combine = tmp['artist'] + ":" + tmp['title']
+            logger.debug(combine)
+                  
+        except:
+            logger.error("%d: %s", ex.args[0], ex.args[1])
+            
+        finally:
+            logger.debug("method 'combine' OUT")
+            return combine
+
+    def get_song_info(self):
+        logger.debug("get_song info")
+        for pos in xrange(1, len(sys.argv), 2):
+            try:
+                self.data[sys.argv[pos]] = sys.argv[pos + 1].decode('utf-8')
+            except UnicodeDecodeError:
+                self.data[sys.argv[pos]] = sys.argv[pos + 1].decode('latin1')
+               
+    def write2sql(self):
+        write2sql = 0
+        try:
+            logger.debug("method 'write2sql' IN")
+            self.conn = mdb.connect(mysqlServer_config['dbHost'],
+                                    mysqlServer_config['dbUsername'],
+                                    mysqlServer_config['dbPassword'],
+                                    mysqlServer_config['dbName'] )
+            
+            cursor = self.conn.cursor()
+            
+            # DEBUG!
+            #if (DEBUG):
+            #    cursor.execute("DROP TABLE playlist")
+
+            cursor.execute("CREATE TABLE IF NOT EXISTS \
+                  playlist(id BIGINT PRIMARY KEY AUTO_INCREMENT, \
+                  artist VARCHAR(40), \
+                  title VARCHAR(40), \
+                  album VARCHAR(40), \
+                  duration INT, \
+                  tracknumber INT, \
+                  id3 INT, \
+                  tstampClient DATETIME, \
+                  tstampServer TIMESTAMP default CURRENT_TIMESTAMP) \
+                                    \
+                                    \
+                  DEFAULT CHARACTER SET utf8 \
+                  COLLATE utf8_general_ci"
+                  )
+                  
+            # double substitution
+            query = """INSERT INTO %s(artist, title, album, duration, tracknumber, tstampClient) \
+                      VALUES(%%s, %%s, %%s, %%s, %%s, %%s)"""
+            
+            query = query % (mysqlServer_config['dbTable'])
+                    
+            cursor.execute(query, ( self.cache_content["artist"], 
+                                    self.cache_content["title"], 
+                                    self.cache_content["album"], 
+                                    self.cache_content["duration"], 
+                                    self.cache_content["tracknumber"],
+                                    time.strftime("%Y-%m-%d %H:%M:%S", 
+                                        time.localtime(int(self.cache_content["start_time"])))
+                                  )
+                                )
+            
+        except mdb.Error, ex:
+            logger.error("%d: %s", ex.args[0], ex.args[1])
+            write2sql = 1
+            
+        finally:
+            if self.conn:
+                self.conn.close()
+            logger.debug("method 'write2sql' OUT")
+            return write2sql
+            
+    def send_sig(self, signal, tmpPid):
+        command = "kill -s %s %s" % (signal, tmpPid)
+        logger.debug(command)
+        send_sig = os.popen(command).read()
+        try:
+            os.system(command)
+        except OSError, ex:
+            logger.error("%d: %s", ex.args[0], ex.args[1])
+        except:
+            logger.error("signal error")
+          
+def usage():
+  print "To use cmus2mysql.py:"
+  print "Use it as status_display_program in cmus"
+  print "\n type :set status_display_program=/patch/to/cmus2mysql.py\n"
+  print "Don't forget to change the mysql login data"
+
+if __name__ == "__main__":
+  #if len(sys.argv) < 2:
+  #    usage()
+  #    sys.exit()
+  
+  lc = LastCmus()
+  lc.update_status()
+  logger.debug("program stopped")
+
