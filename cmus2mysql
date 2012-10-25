@@ -192,8 +192,8 @@ class LastCmus(object):
         except IOError, ex:
             logger.error("%d: %s", ex.args[0], ex.args[1])
             
-        except:
-            logger.error("update_status")
+        except Exception, ex :
+            logger.error("error %s", ex)
             
     def parse_cacheLine(self, cacheLine):
         logger.debug("method 'parse_cacheLine' IN")
@@ -262,20 +262,50 @@ class LastCmus(object):
                 self.data[sys.argv[pos]] = sys.argv[pos + 1].decode('latin1')
                 
     def getMusicbrainz(self):
-        logger.debug("get_musicbrainz")
-        url = 'http://musicbrainz.org/ws/2/release/?query='
+        logger.debug("method 'getMusicbrainz' IN")
+        url = 'http://musicbrainz.org/ws/2/release/?query=release:'
         strAlbum = self.data["album"]
         strArtist = self.data["artist"]
-        url += "%s,%s" % (strAlbum.replace(" ", "+"), strArtist.replace(" ", "+"))
+        url += "\"%s\",\"%s\"" % (strAlbum.replace(" ", "+"), strArtist.replace(" ", "+"))
         logger.debug(url)
         
-        request = urllib2.Request(url)
-        #request.add_header('Mozilla', myToken)
-        response = urllib2.urlopen(request)
-        data = response.read()
-        dom = parseString(data)
-        self.musicbrainzId = dom.getElementsByTagName('release')[0].getAttribute('id')
-        logger.debug(self.musicbrainzId)
+        try:
+            request = urllib2.Request(url)
+            #request.add_header('Mozilla', myToken)
+            response = urllib2.urlopen(request)
+            data = response.read()
+            dom = parseString(data)
+            albumRelease = dom.getElementsByTagName("release")
+            
+            self.musicbrainzId = dom.getElementsByTagName('release')[0].getAttribute('id')
+            titles = []
+            
+            for book in albumRelease:
+                titleObj = book.getElementsByTagName("title")[0]
+                titles.append(titleObj)
+                #logger.debug(titles)
+            
+            counter = 0
+            for title in titles:
+                find = False
+                
+                nodes = title.childNodes
+                for node in nodes:
+                    if node.nodeType == node.TEXT_NODE:
+                        if node.data == strAlbum:
+                            logger.debug(node.data)
+                            find = True
+                            break
+                    counter += 1
+                
+                if find:
+                    self.musicbrainzId = dom.getElementsByTagName('release')[counter].getAttribute('id')
+                    break
+                    
+            logger.debug(self.musicbrainzId)
+            logger.debug("method 'getMusicbrainz' OUT")
+        except Exception, ex:
+            logger.error("error %s", ex)
 
         
     def write2sql(self):
