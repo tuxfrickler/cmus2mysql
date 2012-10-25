@@ -266,7 +266,7 @@ class LastCmus(object):
         url = 'http://musicbrainz.org/ws/2/release/?query='
         strAlbum = self.data["album"]
         strArtist = self.data["artist"]
-        url += strAlbum.replace(" ", "+") + "," + strArtist.replace(" ", "+")
+        url += "%s,%s" % (strAlbum.replace(" ", "+"), strArtist.replace(" ", "+"))
         logger.debug(url)
         
         request = urllib2.Request(url)
