@@ -17,7 +17,7 @@ import signal
 import re
 import os
 import subprocess
-
+import requests
 
 DEBUG = 1
 
@@ -76,8 +76,6 @@ class LastCmus(object):
               self.fpid = matchObj.group(1)
               self.lastSongSubmit = matchObj.group(2)
               pid_f.close()
-        
-        #sleep(min(int(round(self.data['duration']/2.0)), 180))
         
         
     def update_status(self):
@@ -263,18 +261,21 @@ class LastCmus(object):
                 
     def getMusicbrainz(self):
         logger.debug("method 'getMusicbrainz' IN")
-        url = 'http://musicbrainz.org/ws/2/release/?query=release:'
+        url = 'http://musicbrainz.org/ws/2/release/'
         strAlbum = self.data["album"]
         strArtist = self.data["artist"]
-        url += "\"%s\",\"%s\"" % (strAlbum.replace(" ", "+"), strArtist.replace(" ", "+"))
-        logger.debug(url)
+        payload = {'query' : strAlbum}
         
         try:
-            request = urllib2.Request(url)
-            #request.add_header('Mozilla', myToken)
-            response = urllib2.urlopen(request)
-            data = response.read()
-            dom = parseString(data)
+            #results = requests.get(url, 
+            #    params={'q': query, 'first': page}, 
+            #    headers={'User-Agent': user_agent})
+            results = requests.get(url, params=payload)
+            logger.debug(results.url)
+            
+            xml = results.text.encode('utf-8')
+            
+            dom = parseString(xml)
             albumRelease = dom.getElementsByTagName("release")
             
             self.musicbrainzId = dom.getElementsByTagName('release')[0].getAttribute('id')
@@ -283,7 +284,6 @@ class LastCmus(object):
             for book in albumRelease:
                 titleObj = book.getElementsByTagName("title")[0]
                 titles.append(titleObj)
-                #logger.debug(titles)
             
             counter = 0
             for title in titles:
